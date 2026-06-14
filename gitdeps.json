@@ -1,0 +1,7 @@
+{
+  "tests/gtest": {
+    "url": "https://github.com/google/googletest",
+    "commit": "7140cd416cecd7462a8aae488024abeee55598e4",
+    "option": ["dev"]
+  }
+}

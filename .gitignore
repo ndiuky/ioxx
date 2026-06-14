@@ -1,0 +1,8 @@
+.idea
+.vs
+build*
+cmake-build-*
+/tests/gtest
+
+# Common
+.DS_Store
