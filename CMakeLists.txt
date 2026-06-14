@@ -31,7 +31,6 @@ target_compile_features(ioxx PUBLIC cxx_std_20)
 target_include_directories(ioxx
         PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
 )
 
 target_compile_definitions(ioxx PUBLIC "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:IOXX_SHARED>")
@@ -45,6 +44,53 @@ else()
     target_link_libraries(ioxx PUBLIC Threads::Threads)
 endif()
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set(ioxx_INSTALL_TARGETS_ARGS
+    EXPORT ioxxTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+if(IOXX_BUILD_MODULES)
+    list(APPEND ioxx_INSTALL_TARGETS_ARGS CXX_MODULES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ioxx)
+endif()
+
+install(TARGETS ioxx ${ioxx_INSTALL_TARGETS_ARGS})
+
+install(DIRECTORY include/ioxx
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+install(EXPORT ioxxTargets
+    FILE ioxxTargets.cmake
+    NAMESPACE ioxx::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ioxx
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/ioxxConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ioxxConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/ioxxConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ioxx
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/ioxxConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/ioxxConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ioxx
+)
+
 if (BUILD_EXAMPLES)
     add_executable(ioxx_tcp_server examples/tcp_server.cpp)
     target_link_libraries(ioxx_tcp_server PRIVATE ioxx::ioxx)
@@ -54,6 +100,7 @@ if (BUILD_EXAMPLES)
 endif ()
 
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/gtest")
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     add_subdirectory(tests/gtest)
 
     add_executable(ioxx_tests
