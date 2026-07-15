@@ -44,25 +44,11 @@ bool wait_for_event(ioxx::Poll& poll, ioxx::Events& events, ioxx::Token token, i
     return false;
 }
 
-void expect_udp_send(ioxx::net::UdpSocket& socket, std::string_view payload) {
-    std::error_code ec;
-    const auto sent = socket.send(payload, ec);
-    ASSERT_FALSE(ec) << ec.message();
-    ASSERT_EQ(sent, payload.size());
-}
-
 void expect_udp_send_to(ioxx::net::UdpSocket& socket, std::string_view payload, const ioxx::net::SocketAddr& peer) {
     std::error_code ec;
     const auto sent = socket.send_to(payload.data(), payload.size(), peer, ec);
     ASSERT_FALSE(ec) << ec.message();
     ASSERT_EQ(sent, payload.size());
-}
-
-std::string_view recv_udp(ioxx::net::UdpSocket& socket, std::array<std::byte, 128>& buffer) {
-    std::error_code ec;
-    const auto received = socket.recv(buffer, ec);
-    EXPECT_FALSE(ec) << ec.message();
-    return {reinterpret_cast<const char*>(buffer.data()), received};
 }
 
 std::pair<std::string_view, ioxx::net::SocketAddr> recv_udp_from(ioxx::net::UdpSocket& socket,
@@ -192,22 +178,17 @@ TEST(UdpTests, UdpVectoredIo) {
     EXPECT_EQ(std::memcmp(buf2.data(), "ping", 4), 0);
 }
 
-TEST(UdpTests, UdpConnectedClientUnconnectedServerConversation) {
+TEST(UdpTests, UdpSendToWorksWithoutConnect) {
     ioxx::Poll poll;
     ioxx::Events events{16};
 
     auto server = ioxx::net::UdpSocket::bind(loopback());
     auto client = ioxx::net::UdpSocket::bind(loopback());
 
-    std::error_code ec;
-    client.connect(server.local_endpoint(), ec);
-    ASSERT_FALSE(ec) << ec.message();
-    EXPECT_EQ(client.peer_endpoint().port(), server.local_endpoint().port());
-
     poll.registry().register_source(server, ioxx::Token{1}, ioxx::Interest::READABLE);
     poll.registry().register_source(client, ioxx::Token{2}, ioxx::Interest::READABLE);
 
-    expect_udp_send(client, "udp-client/request");
+    expect_udp_send_to(client, "udp-client/request", server.local_endpoint());
 
     std::array<std::byte, 128> server_buffer{};
     ASSERT_TRUE(wait_for_event(poll, events, ioxx::Token{1}, ioxx::Interest::READABLE));
@@ -219,10 +200,12 @@ TEST(UdpTests, UdpConnectedClientUnconnectedServerConversation) {
 
     std::array<std::byte, 128> client_buffer{};
     ASSERT_TRUE(wait_for_event(poll, events, ioxx::Token{2}, ioxx::Interest::READABLE));
-    EXPECT_EQ(recv_udp(client, client_buffer), "udp-server/reply");
+    const auto [reply, server_peer] = recv_udp_from(client, client_buffer);
+    EXPECT_EQ(reply, "udp-server/reply");
+    EXPECT_EQ(server_peer.port(), server.local_endpoint().port());
 }
 
-TEST(UdpTests, UdpServerRepliesToMultipleConnectedClients) {
+TEST(UdpTests, UdpServerRepliesToMultipleUnconnectedClientsWithSendTo) {
     ioxx::Poll poll;
     ioxx::Events events{16};
 
@@ -230,12 +213,6 @@ TEST(UdpTests, UdpServerRepliesToMultipleConnectedClients) {
     auto client1 = ioxx::net::UdpSocket::bind(loopback());
     auto client2 = ioxx::net::UdpSocket::bind(loopback());
     const auto server_endpoint = server.local_endpoint();
-
-    std::error_code ec;
-    client1.connect(server_endpoint, ec);
-    ASSERT_FALSE(ec) << ec.message();
-    client2.connect(server_endpoint, ec);
-    ASSERT_FALSE(ec) << ec.message();
 
     poll.registry().register_source(server, ioxx::Token{10}, ioxx::Interest::READABLE);
     poll.registry().register_source(client1, ioxx::Token{11}, ioxx::Interest::READABLE);
@@ -245,14 +222,14 @@ TEST(UdpTests, UdpServerRepliesToMultipleConnectedClients) {
     ioxx::net::SocketAddr client1_peer{};
     ioxx::net::SocketAddr client2_peer{};
 
-    expect_udp_send(client1, "client-1/datagram");
+    expect_udp_send_to(client1, "client-1/datagram", server_endpoint);
     ASSERT_TRUE(wait_for_event(poll, events, ioxx::Token{10}, ioxx::Interest::READABLE));
     auto [payload1, peer1] = recv_udp_from(server, server_buffer);
     EXPECT_EQ(payload1, "client-1/datagram");
     EXPECT_EQ(peer1.port(), client1.local_endpoint().port());
     client1_peer = peer1;
 
-    expect_udp_send(client2, "client-2/datagram");
+    expect_udp_send_to(client2, "client-2/datagram", server_endpoint);
     ASSERT_TRUE(wait_for_event(poll, events, ioxx::Token{10}, ioxx::Interest::READABLE));
     auto [payload2, peer2] = recv_udp_from(server, server_buffer);
     EXPECT_EQ(payload2, "client-2/datagram");
@@ -262,9 +239,13 @@ TEST(UdpTests, UdpServerRepliesToMultipleConnectedClients) {
     expect_udp_send_to(server, "reply/client-1", client1_peer);
     std::array<std::byte, 128> client_buffer{};
     ASSERT_TRUE(wait_for_event(poll, events, ioxx::Token{11}, ioxx::Interest::READABLE));
-    EXPECT_EQ(recv_udp(client1, client_buffer), "reply/client-1");
+    auto [reply1, server_peer1] = recv_udp_from(client1, client_buffer);
+    EXPECT_EQ(reply1, "reply/client-1");
+    EXPECT_EQ(server_peer1.port(), server_endpoint.port());
 
     expect_udp_send_to(server, "reply/client-2", client2_peer);
     ASSERT_TRUE(wait_for_event(poll, events, ioxx::Token{12}, ioxx::Interest::READABLE));
-    EXPECT_EQ(recv_udp(client2, client_buffer), "reply/client-2");
+    auto [reply2, server_peer2] = recv_udp_from(client2, client_buffer);
+    EXPECT_EQ(reply2, "reply/client-2");
+    EXPECT_EQ(server_peer2.port(), server_endpoint.port());
 }
