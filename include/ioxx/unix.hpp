@@ -3,6 +3,7 @@
 #if !defined(_WIN32)
 
 #include <ioxx/core.hpp>
+#include <ioxx/net.hpp>
 
 #include <cstddef>
 #include <cstdint>

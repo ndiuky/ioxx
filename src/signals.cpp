@@ -382,15 +382,19 @@ SourceKind Signals::source_kind() const noexcept {
 }
 
 void Signals::on_registered(const Registry& registry, Token token, Interest interests) {
-    registry.register_handle(native_handle(), source_kind(), token, interests);
+    (void)registry;
+    (void)token;
+    (void)interests;
 }
 
 void Signals::on_reregistered(const Registry& registry, Token token, Interest interests) {
-    registry.reregister_handle(native_handle(), source_kind(), token, interests);
+    (void)registry;
+    (void)token;
+    (void)interests;
 }
 
 void Signals::on_deregistered(const Registry& registry) {
-    registry.deregister_handle(native_handle());
+    (void)registry;
 }
 
 } // namespace ioxx

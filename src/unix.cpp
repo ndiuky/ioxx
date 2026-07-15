@@ -798,21 +798,13 @@ std::pair<std::size_t, std::string> UnixDatagram::recv_from(std::span<std::byte>
 std::size_t UnixDatagram::send_vectored_to(std::span<const net::IoSlice> buffers, std::string_view path, std::error_code& ec) const noexcept {
     require_fd(fd_, ec);
     if (ec) return 0;
-    sockaddr_un address{};
-    socklen_t length = 0;
-    if (!path.empty()) {
-        try {
-            address = sockaddr_from_path(path, length);
-        } catch (const std::invalid_argument&) {
-            ec = std::make_error_code(std::errc::invalid_argument);
-            return 0;
-        }
-    }
+    auto address = socket_address(path, ec);
+    if (ec) return 0;
     
     msghdr msg{};
     if (!path.empty()) {
         msg.msg_name = &address;
-        msg.msg_namelen = length;
+        msg.msg_namelen = socket_address_length(address);
     }
     msg.msg_iov = reinterpret_cast<iovec*>(const_cast<net::IoSlice*>(buffers.data()));
     msg.msg_iovlen = buffers.size();

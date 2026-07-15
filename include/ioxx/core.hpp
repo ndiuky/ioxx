@@ -43,6 +43,12 @@ private:
 
 class IOXX_API Interest {
 private:
+    static constexpr std::uint8_t readable_bit = 0b0000'0001;
+    static constexpr std::uint8_t writable_bit = 0b0000'0010;
+    static constexpr std::uint8_t aio_bit = 0b0000'0100;
+    static constexpr std::uint8_t lio_bit = 0b0000'1000;
+    static constexpr std::uint8_t priority_bit = 0b0001'0000;
+
     constexpr explicit Interest(std::uint8_t bits) noexcept : bits_(bits) {}
 
 public:
@@ -66,11 +72,11 @@ public:
         return Interest{bits};
     }
 
-    [[nodiscard]] constexpr bool is_readable() const noexcept { return (bits_ & READABLE.bits_) != 0; }
-    [[nodiscard]] constexpr bool is_writable() const noexcept { return (bits_ & WRITABLE.bits_) != 0; }
-    [[nodiscard]] constexpr bool is_aio() const noexcept { return (bits_ & AIO.bits_) != 0; }
-    [[nodiscard]] constexpr bool is_lio() const noexcept { return (bits_ & LIO.bits_) != 0; }
-    [[nodiscard]] constexpr bool is_priority() const noexcept { return (bits_ & PRIORITY.bits_) != 0; }
+    [[nodiscard]] constexpr bool is_readable() const noexcept { return (bits_ & readable_bit) != 0; }
+    [[nodiscard]] constexpr bool is_writable() const noexcept { return (bits_ & writable_bit) != 0; }
+    [[nodiscard]] constexpr bool is_aio() const noexcept { return (bits_ & aio_bit) != 0; }
+    [[nodiscard]] constexpr bool is_lio() const noexcept { return (bits_ & lio_bit) != 0; }
+    [[nodiscard]] constexpr bool is_priority() const noexcept { return (bits_ & priority_bit) != 0; }
     [[nodiscard]] constexpr bool empty() const noexcept { return bits_ == 0; }
     [[nodiscard]] constexpr std::uint8_t bits() const noexcept { return bits_; }
 
@@ -80,11 +86,11 @@ private:
     std::uint8_t bits_{};
 };
 
-inline constexpr Interest Interest::READABLE{0b0000'0001};
-inline constexpr Interest Interest::WRITABLE{0b0000'0010};
-inline constexpr Interest Interest::AIO{0b0000'0100};
-inline constexpr Interest Interest::LIO{0b0000'1000};
-inline constexpr Interest Interest::PRIORITY{0b0001'0000};
+inline constexpr Interest Interest::READABLE{Interest::readable_bit};
+inline constexpr Interest Interest::WRITABLE{Interest::writable_bit};
+inline constexpr Interest Interest::AIO{Interest::aio_bit};
+inline constexpr Interest Interest::LIO{Interest::lio_bit};
+inline constexpr Interest Interest::PRIORITY{Interest::priority_bit};
 
 constexpr Interest operator|(Interest lhs, Interest rhs) noexcept {
     return lhs.add(rhs);

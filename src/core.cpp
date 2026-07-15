@@ -452,7 +452,7 @@ struct AfdOperation {
 void add_kevent(std::vector<kevent>& changes, uintptr_t ident, short filter, unsigned short flags,
                 Token token) {
     kevent event{};
-    EV_SET(&event, ident, filter, flags, 0, 0, reinterpret_cast<void*>(token.value));
+    EV_SET(&event, ident, filter, flags, 0, 0, reinterpret_cast<void*>(token.value()));
     changes.push_back(event);
 }
 
@@ -474,6 +474,11 @@ void append_kqueue_changes(std::vector<kevent>& changes, native_handle_type hand
         add_kevent(changes, static_cast<uintptr_t>(handle), EVFILT_LIO, flags, token);
     }
 #endif
+#if defined(EVFILT_EXCEPT)
+    if (interests.is_priority()) {
+        add_kevent(changes, static_cast<uintptr_t>(handle), EVFILT_EXCEPT, flags, token);
+    }
+#endif
 }
 
 [[nodiscard]] Interest from_kqueue_event(const kevent& event) noexcept {
@@ -489,6 +494,10 @@ void append_kqueue_changes(std::vector<kevent>& changes, native_handle_type hand
 #if defined(EVFILT_LIO)
     } else if (event.filter == EVFILT_LIO) {
         readiness |= Interest::LIO;
+#endif
+#if defined(EVFILT_EXCEPT)
+    } else if (event.filter == EVFILT_EXCEPT) {
+        readiness |= Interest::PRIORITY;
 #endif
     }
     return readiness;
@@ -577,6 +586,7 @@ public:
     void update(native_handle_type handle, SourceKind kind, Token token, Interest interests) {
         validate(handle, interests);
 
+        Registration previous{};
         {
             std::lock_guard lock{mutex_};
             auto item = registrations_.find(handle);
@@ -584,12 +594,29 @@ public:
                 throw std::system_error(std::make_error_code(std::errc::no_such_file_or_directory),
                                         "source is not registered");
             }
-            item->second.kind = kind;
-            item->second.token = token;
-            item->second.interests = interests;
+            previous = item->second;
         }
 
-        update_backend(handle, kind, token, interests);
+        try {
+            update_backend(handle, kind, token, interests);
+        } catch (...) {
+            std::lock_guard lock{mutex_};
+            const auto item = registrations_.find(handle);
+            if (item != registrations_.end()) {
+                item->second = previous;
+            }
+            throw;
+        }
+
+        {
+            std::lock_guard lock{mutex_};
+            auto item = registrations_.find(handle);
+            if (item != registrations_.end()) {
+                item->second.kind = kind;
+                item->second.token = token;
+                item->second.interests = interests;
+            }
+        }
         cv_.notify_all();
     }
 
@@ -686,6 +713,37 @@ private:
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
                                     "interest set must not be empty");
         }
+#if defined(__linux__) || defined(_WIN32)
+        if (interests.is_aio() || interests.is_lio()) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "AIO/LIO interests are not supported by this backend");
+        }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
+    defined(__DragonFly__)
+#if !defined(EVFILT_AIO)
+        if (interests.is_aio()) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "AIO interest is not supported by this kqueue backend");
+        }
+#endif
+#if !defined(EVFILT_LIO)
+        if (interests.is_lio()) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "LIO interest is not supported by this kqueue backend");
+        }
+#endif
+#if !defined(EVFILT_EXCEPT)
+        if (interests.is_priority()) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "PRIORITY interest is not supported by this kqueue backend");
+        }
+#endif
+#else
+        if (interests.is_aio() || interests.is_lio()) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "AIO/LIO interests are not supported by this backend");
+        }
+#endif
     }
 
     [[nodiscard]] std::vector<Registration> snapshot() const {
@@ -768,8 +826,9 @@ private:
                                            Interest::AIO | Interest::LIO | Interest::PRIORITY,
                               token, EV_DELETE);
         append_kqueue_changes(changes, handle, interests, token, EV_ADD | EV_CLEAR);
-        if (!changes.empty()) {
-            ::kevent(backend_, changes.data(), static_cast<int>(changes.size()), nullptr, 0, nullptr);
+        if (!changes.empty() && ::kevent(backend_, changes.data(), static_cast<int>(changes.size()),
+                                         nullptr, 0, nullptr) == -1) {
+            throw std::system_error(errno, std::generic_category(), "kevent(MOD)");
         }
 #else
         (void)handle;
@@ -916,9 +975,16 @@ private:
             state->poll_info.handles[0].events = state->user_events | afd_poll_local_close;
             state->poll_info.handles[0].status = 0;
 
-            (void)state->afd->poll(state->poll_info, state->iosb, operation.get());
+            const bool completed = state->afd->poll(state->poll_info, state->iosb, operation.get());
             state->status = AfdPollStatus::pending;
             state->pending_events = state->user_events;
+            if (completed) {
+                auto* raw = reinterpret_cast<OVERLAPPED*>(operation.get());
+                if (::PostQueuedCompletionStatus(iocp_, 0, AfdHelper::afd_completion_key, raw) == 0) {
+                    throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(),
+                                            "PostQueuedCompletionStatus(AFD)");
+                }
+            }
         }
 
         (void)operation.release();

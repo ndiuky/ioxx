@@ -701,11 +701,21 @@ TcpListener::TcpListener(native_handle_type handle)
 TcpListener::TcpListener(std::unique_ptr<detail::Socket> socket) : socket_(std::move(socket)) {}
 
 TcpListener TcpListener::bind(const SocketAddr& endpoint, int backlog, std::error_code& ec) noexcept {
-    auto socket = TcpSocket::new_v4(ec);
-    if (ec) return TcpListener{};
-    socket.set_reuseaddr(true, ec);
-    if (ec) return TcpListener{};
-    return socket.bind(endpoint, backlog, ec);
+    auto socket = try_address(endpoint, SOCK_STREAM, IPPROTO_TCP, ec,
+                              [backlog](detail::Socket& socket, const detail::ResolvedAddress& address, std::error_code& ec) {
+        detail::set_reuse_addr(socket.get(), true, ec);
+        if (ec) return;
+        if (::bind(socket.get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        if (::listen(socket.get(), backlog) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        ec.clear();
+    });
+    return TcpListener{std::move(socket)};
 }
 
 TcpListener TcpListener::bind(const SocketAddr& endpoint, std::error_code& ec) noexcept {
