@@ -25,7 +25,7 @@ void expect_connected(const ioxx::net::TcpStream& stream) {
 
 bool is_retryable_socket_error(const std::error_code& ec) {
     if (ioxx::is_would_block(ec) || ec == std::errc::not_connected ||
-        ec == std::errc::operation_in_progress || ec == std::errc::operation_already_in_progress) {
+        ec == std::errc::operation_in_progress || ec == std::errc::connection_already_in_progress) {
         return true;
     }
 #if defined(_WIN32)
