@@ -334,7 +334,8 @@ public:
                                     "CreateIoCompletionPort(AFD)");
         }
 
-        if (::SetFileCompletionNotificationModes(handle_, FILE_SKIP_SET_EVENT_ON_HANDLE) == 0) {
+        if (::SetFileCompletionNotificationModes(
+                handle_, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) == 0) {
             const DWORD error = ::GetLastError();
             ::CloseHandle(handle_);
             handle_ = INVALID_HANDLE_VALUE;
