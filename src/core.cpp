@@ -391,6 +391,8 @@ enum class AfdPollStatus {
     cancelled,
 };
 
+struct AfdOperation;
+
 struct AfdSocketState : std::enable_shared_from_this<AfdSocketState> {
     explicit AfdSocketState(native_handle_type socket_handle, std::shared_ptr<AfdHelper> helper)
         : afd(std::move(helper)), socket(socket_handle), base_socket(static_cast<native_handle_type>(get_base_socket(static_cast<SOCKET>(socket_handle)))) {}
@@ -405,12 +407,15 @@ struct AfdSocketState : std::enable_shared_from_this<AfdSocketState> {
     ULONG pending_events{};
     AfdPollStatus status{AfdPollStatus::idle};
     bool delete_pending{};
-    NtIoStatusBlock iosb{};
-    AfdPollInfo poll_info{};
+    AfdOperation* pending_operation{};
 };
 
 struct AfdOperation {
     explicit AfdOperation(std::shared_ptr<AfdSocketState> state) : state(std::move(state)) {}
+    // GQCS can report the native IO_STATUS_BLOCK as lpOverlapped for Nt* calls.
+    // Keep it first so the completion pointer can be cast back to AfdOperation.
+    NtIoStatusBlock iosb{};
+    AfdPollInfo poll_info{};
     std::shared_ptr<AfdSocketState> state;
 };
 
@@ -845,7 +850,9 @@ private:
             registration.afd_state->delete_pending = true;
             if (registration.afd_state->status == AfdPollStatus::pending) {
                 try {
-                    registration.afd_state->afd->cancel(registration.afd_state->iosb);
+                    if (registration.afd_state->pending_operation != nullptr) {
+                        registration.afd_state->afd->cancel(registration.afd_state->pending_operation->iosb);
+                    }
                     registration.afd_state->status = AfdPollStatus::cancelled;
                 } catch (...) {
                 }
@@ -957,7 +964,9 @@ private:
                 if ((state->user_events & afd_known_events & ~state->pending_events) == 0) {
                     return;
                 }
-                state->afd->cancel(state->iosb);
+                if (state->pending_operation != nullptr) {
+                    state->afd->cancel(state->pending_operation->iosb);
+                }
                 state->status = AfdPollStatus::cancelled;
                 state->pending_events = 0;
                 return;
@@ -967,20 +976,24 @@ private:
                 return;
             }
 
-            state->poll_info = AfdPollInfo{};
-            state->poll_info.timeout = std::numeric_limits<LONGLONG>::max();
-            state->poll_info.number_of_handles = 1;
-            state->poll_info.exclusive = 0;
-            state->poll_info.handles[0].handle = reinterpret_cast<HANDLE>(state->base_socket);
-            state->poll_info.handles[0].events = state->user_events | afd_poll_local_close;
-            state->poll_info.handles[0].status = 0;
+            operation->poll_info = AfdPollInfo{};
+            operation->poll_info.timeout = std::numeric_limits<LONGLONG>::max();
+            operation->poll_info.number_of_handles = 1;
+            operation->poll_info.exclusive = 0;
+            operation->poll_info.handles[0].handle = reinterpret_cast<HANDLE>(state->base_socket);
+            operation->poll_info.handles[0].events = state->user_events | afd_poll_local_close;
+            operation->poll_info.handles[0].status = 0;
 
-            const bool completed = state->afd->poll(state->poll_info, state->iosb, operation.get());
+            const bool completed = state->afd->poll(operation->poll_info, operation->iosb, operation.get());
             state->status = AfdPollStatus::pending;
             state->pending_events = state->user_events;
+            state->pending_operation = operation.get();
             if (completed) {
-                auto* raw = reinterpret_cast<OVERLAPPED*>(operation.get());
+                auto* raw = reinterpret_cast<OVERLAPPED*>(&operation->iosb);
                 if (::PostQueuedCompletionStatus(iocp_, 0, AfdHelper::afd_completion_key, raw) == 0) {
+                    state->pending_operation = nullptr;
+                    state->status = AfdPollStatus::idle;
+                    state->pending_events = 0;
                     throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(),
                                             "PostQueuedCompletionStatus(AFD)");
                 }
@@ -1002,23 +1015,26 @@ private:
             std::lock_guard state_lock{state->mutex};
             state->status = AfdPollStatus::idle;
             state->pending_events = 0;
+            if (state->pending_operation == raw_operation) {
+                state->pending_operation = nullptr;
+            }
 
             if (state->delete_pending) {
                 return;
             }
 
-            const NtStatus status = state->iosb.status;
+            const NtStatus status = operation->iosb.status;
             if (status == status_cancelled) {
                 reissue = state->user_events != 0;
             } else if (status < 0) {
                 afd_events = afd_poll_connect_fail;
-            } else if (state->poll_info.number_of_handles < 1) {
+            } else if (operation->poll_info.number_of_handles < 1) {
                 reissue = state->user_events != 0;
-            } else if ((state->poll_info.handles[0].events & afd_poll_local_close) != 0) {
+            } else if ((operation->poll_info.handles[0].events & afd_poll_local_close) != 0) {
                 state->delete_pending = true;
                 return;
             } else {
-                afd_events = state->poll_info.handles[0].events;
+                afd_events = operation->poll_info.handles[0].events;
             }
 
             afd_events &= state->user_events;
