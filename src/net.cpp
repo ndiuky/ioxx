@@ -264,10 +264,43 @@ void TcpSocket::set_tcp_fastopen_connect(bool enabled) const {
     if (ec) throw detail::socket_exception("setsockopt", ec);
 }
 
+void TcpSocket::set_ipv6_only(bool enabled, std::error_code& ec) const noexcept {
+    require_socket(socket_, ec);
+    if (ec) return;
+    detail::set_ipv6_only(socket_->get(), enabled, ec);
+}
+
+void TcpSocket::set_ipv6_only(bool enabled) const {
+    std::error_code ec;
+    set_ipv6_only(enabled, ec);
+    if (ec) throw detail::socket_exception("setsockopt(IPV6_V6ONLY)", ec);
+}
+
+bool TcpSocket::ipv6_only(std::error_code& ec) const noexcept {
+    require_socket(socket_, ec);
+    if (ec) return false;
+    return detail::get_ipv6_only(socket_->get(), ec);
+}
+
+bool TcpSocket::ipv6_only() const {
+    std::error_code ec;
+    const auto res = ipv6_only(ec);
+    if (ec) throw detail::socket_exception("getsockopt(IPV6_V6ONLY)", ec);
+    return res;
+}
+
+void TcpSocket::set_dual_stack(bool enabled, std::error_code& ec) const noexcept {
+    set_ipv6_only(!enabled, ec);
+}
+
+void TcpSocket::set_dual_stack(bool enabled) const {
+    set_ipv6_only(!enabled);
+}
+
 TcpListener TcpSocket::bind(const SocketAddr& endpoint, int backlog, std::error_code& ec) noexcept {
     require_socket(socket_, ec);
     if (ec) return TcpListener{};
-    auto address = detail::resolve_endpoint(endpoint, SOCK_STREAM, IPPROTO_TCP, ec);
+    auto address = detail::resolve_endpoint_for_socket(socket_->get(), endpoint, SOCK_STREAM, IPPROTO_TCP, ec);
     if (ec) return TcpListener{};
     if (::bind(socket_->get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) != 0) {
         ec = detail::last_socket_error();
@@ -291,7 +324,7 @@ TcpListener TcpSocket::bind(const SocketAddr& endpoint, int backlog) {
 TcpStream TcpSocket::connect(const SocketAddr& endpoint, std::error_code& ec) noexcept {
     require_socket(socket_, ec);
     if (ec) return TcpStream{};
-    auto address = detail::resolve_endpoint(endpoint, SOCK_STREAM, IPPROTO_TCP, ec);
+    auto address = detail::resolve_endpoint_for_socket(socket_->get(), endpoint, SOCK_STREAM, IPPROTO_TCP, ec);
     if (ec) return TcpStream{};
     const int result = ::connect(socket_->get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length);
     if (result == 0) {
@@ -659,7 +692,7 @@ bool TcpStream::nodelay() const {
 void TcpStream::set_ttl(std::uint32_t ttl, std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return;
-    detail::set_socket_int_option(socket_->get(), IPPROTO_IP, IP_TTL, static_cast<int>(ttl), ec);
+    detail::set_unicast_hops(socket_->get(), ttl, ec);
 }
 
 void TcpStream::set_ttl(std::uint32_t ttl) const {
@@ -671,7 +704,7 @@ void TcpStream::set_ttl(std::uint32_t ttl) const {
 std::uint32_t TcpStream::ttl(std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return 0;
-    return static_cast<std::uint32_t>(detail::get_socket_int_option(socket_->get(), IPPROTO_IP, IP_TTL, ec));
+    return detail::get_unicast_hops(socket_->get(), ec);
 }
 
 std::uint32_t TcpStream::ttl() const {
@@ -720,6 +753,69 @@ TcpListener TcpListener::bind(const SocketAddr& endpoint, int backlog, std::erro
 
 TcpListener TcpListener::bind(const SocketAddr& endpoint, std::error_code& ec) noexcept {
     return bind(endpoint, 128, ec);
+}
+
+TcpListener TcpListener::bind_v6_only(const SocketAddrV6& endpoint, int backlog, std::error_code& ec) noexcept {
+    auto socket = try_address(endpoint, SOCK_STREAM, IPPROTO_TCP, ec,
+                              [backlog](detail::Socket& socket, const detail::ResolvedAddress& address, std::error_code& ec) {
+        detail::set_ipv6_only(socket.get(), true, ec);
+        if (ec) return;
+        detail::set_reuse_addr(socket.get(), true, ec);
+        if (ec) return;
+        if (::bind(socket.get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        if (::listen(socket.get(), backlog) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        ec.clear();
+    });
+    return TcpListener{std::move(socket)};
+}
+
+TcpListener TcpListener::bind_v6_only(const SocketAddrV6& endpoint, std::error_code& ec) noexcept {
+    return bind_v6_only(endpoint, 128, ec);
+}
+
+TcpListener TcpListener::bind_v6_only(const SocketAddrV6& endpoint, int backlog) {
+    std::error_code ec;
+    auto res = bind_v6_only(endpoint, backlog, ec);
+    if (ec) throw detail::socket_exception("bind_v6_only", ec);
+    return res;
+}
+
+TcpListener TcpListener::bind_dual_stack(std::uint16_t port, int backlog, std::error_code& ec) noexcept {
+    const SocketAddr endpoint = SocketAddrV6{Ipv6Addr{}, port};
+    auto socket = try_address(endpoint, SOCK_STREAM, IPPROTO_TCP, ec,
+                              [backlog](detail::Socket& socket, const detail::ResolvedAddress& address, std::error_code& ec) {
+        detail::set_ipv6_only(socket.get(), false, ec);
+        if (ec) return;
+        detail::set_reuse_addr(socket.get(), true, ec);
+        if (ec) return;
+        if (::bind(socket.get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        if (::listen(socket.get(), backlog) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        ec.clear();
+    });
+    return TcpListener{std::move(socket)};
+}
+
+TcpListener TcpListener::bind_dual_stack(std::uint16_t port, std::error_code& ec) noexcept {
+    return bind_dual_stack(port, 128, ec);
+}
+
+TcpListener TcpListener::bind_dual_stack(std::uint16_t port, int backlog) {
+    std::error_code ec;
+    auto res = bind_dual_stack(port, backlog, ec);
+    if (ec) throw detail::socket_exception("bind_dual_stack", ec);
+    return res;
 }
 
 TcpListener TcpListener::bind(const SocketAddr& endpoint, int backlog) {
@@ -819,7 +915,7 @@ std::pair<TcpStream, SocketAddr> TcpListener::accept() const {
 void TcpListener::set_ttl(std::uint32_t ttl, std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return;
-    detail::set_socket_int_option(socket_->get(), IPPROTO_IP, IP_TTL, static_cast<int>(ttl), ec);
+    detail::set_unicast_hops(socket_->get(), ttl, ec);
 }
 
 void TcpListener::set_ttl(std::uint32_t ttl) const {
@@ -831,7 +927,7 @@ void TcpListener::set_ttl(std::uint32_t ttl) const {
 std::uint32_t TcpListener::ttl(std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return 0;
-    return static_cast<std::uint32_t>(detail::get_socket_int_option(socket_->get(), IPPROTO_IP, IP_TTL, ec));
+    return detail::get_unicast_hops(socket_->get(), ec);
 }
 
 std::uint32_t TcpListener::ttl() const {
@@ -872,6 +968,53 @@ UdpSocket UdpSocket::bind(const SocketAddr& endpoint, std::error_code& ec) noexc
         ec.clear();
     });
     return UdpSocket{std::move(socket)};
+}
+
+UdpSocket UdpSocket::bind_v6_only(const SocketAddrV6& endpoint, std::error_code& ec) noexcept {
+    auto socket = try_address(endpoint, SOCK_DGRAM, IPPROTO_UDP, ec,
+                              [](detail::Socket& socket, const detail::ResolvedAddress& address, std::error_code& ec) {
+        detail::set_ipv6_only(socket.get(), true, ec);
+        if (ec) return;
+        detail::set_reuse_addr(socket.get(), true, ec);
+        if (ec) return;
+        if (::bind(socket.get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        ec.clear();
+    });
+    return UdpSocket{std::move(socket)};
+}
+
+UdpSocket UdpSocket::bind_v6_only(const SocketAddrV6& endpoint) {
+    std::error_code ec;
+    auto res = bind_v6_only(endpoint, ec);
+    if (ec) throw detail::socket_exception("bind_v6_only(udp)", ec);
+    return res;
+}
+
+UdpSocket UdpSocket::bind_dual_stack(std::uint16_t port, std::error_code& ec) noexcept {
+    const SocketAddr endpoint = SocketAddrV6{Ipv6Addr{}, port};
+    auto socket = try_address(endpoint, SOCK_DGRAM, IPPROTO_UDP, ec,
+                              [](detail::Socket& socket, const detail::ResolvedAddress& address, std::error_code& ec) {
+        detail::set_ipv6_only(socket.get(), false, ec);
+        if (ec) return;
+        detail::set_reuse_addr(socket.get(), true, ec);
+        if (ec) return;
+        if (::bind(socket.get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) != 0) {
+            ec = detail::last_socket_error();
+            return;
+        }
+        ec.clear();
+    });
+    return UdpSocket{std::move(socket)};
+}
+
+UdpSocket UdpSocket::bind_dual_stack(std::uint16_t port) {
+    std::error_code ec;
+    auto res = bind_dual_stack(port, ec);
+    if (ec) throw detail::socket_exception("bind_dual_stack(udp)", ec);
+    return res;
 }
 
 UdpSocket UdpSocket::bind(const SocketAddr& endpoint) {
@@ -944,7 +1087,7 @@ SocketAddr UdpSocket::peer_endpoint() const {
 void UdpSocket::connect(const SocketAddr& endpoint, std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return;
-    auto address = detail::resolve_endpoint(endpoint, SOCK_DGRAM, IPPROTO_UDP, ec);
+    auto address = detail::resolve_endpoint_for_socket(socket_->get(), endpoint, SOCK_DGRAM, IPPROTO_UDP, ec);
     if (ec) return;
     if (::connect(socket_->get(), reinterpret_cast<const sockaddr*>(&address.storage), address.length) == 0) {
         ec.clear();
@@ -1052,7 +1195,7 @@ std::size_t UdpSocket::recv(std::span<std::byte> buffer) const {
 std::size_t UdpSocket::send_to(const void* data, std::size_t size, const SocketAddr& endpoint, std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return 0;
-    auto address = detail::resolve_endpoint(endpoint, SOCK_DGRAM, IPPROTO_UDP, ec);
+    auto address = detail::resolve_endpoint_for_socket(socket_->get(), endpoint, SOCK_DGRAM, IPPROTO_UDP, ec);
     if (ec) return 0;
 #if defined(_WIN32)
     const int result = ::sendto(socket_->get(), static_cast<const char*>(data), static_cast<int>(size), 0,
@@ -1097,7 +1240,7 @@ std::size_t UdpSocket::send_to(std::span<const std::byte> buffer, const SocketAd
 std::size_t UdpSocket::send_vectored_to(std::span<const IoSlice> buffers, const SocketAddr& endpoint, std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return 0;
-    auto address = detail::resolve_endpoint(endpoint, SOCK_DGRAM, IPPROTO_UDP, ec);
+    auto address = detail::resolve_endpoint_for_socket(socket_->get(), endpoint, SOCK_DGRAM, IPPROTO_UDP, ec);
     if (ec) return 0;
 
 #if defined(_WIN32)
@@ -1278,7 +1421,7 @@ std::pair<std::size_t, SocketAddr> UdpSocket::peek_from(void* data, std::size_t 
 void UdpSocket::set_ttl(std::uint32_t ttl, std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return;
-    detail::set_socket_int_option(socket_->get(), IPPROTO_IP, IP_TTL, static_cast<int>(ttl), ec);
+    detail::set_unicast_hops(socket_->get(), ttl, ec);
 }
 
 void UdpSocket::set_ttl(std::uint32_t ttl) const {
@@ -1290,7 +1433,7 @@ void UdpSocket::set_ttl(std::uint32_t ttl) const {
 std::uint32_t UdpSocket::ttl(std::error_code& ec) const noexcept {
     require_socket(socket_, ec);
     if (ec) return 0;
-    return static_cast<std::uint32_t>(detail::get_socket_int_option(socket_->get(), IPPROTO_IP, IP_TTL, ec));
+    return detail::get_unicast_hops(socket_->get(), ec);
 }
 
 std::uint32_t UdpSocket::ttl() const {

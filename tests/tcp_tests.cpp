@@ -18,6 +18,10 @@ ioxx::net::SocketAddrV4 loopback(std::uint16_t port = 0) {
     return ioxx::net::SocketAddrV4{ioxx::net::Ipv4Addr{127, 0, 0, 1}, port};
 }
 
+ioxx::net::SocketAddrV6 loopback_v6(std::uint16_t port = 0) {
+    return ioxx::net::SocketAddrV6{ioxx::net::Ipv6Addr{0, 0, 0, 0, 0, 0, 0, 1}, port};
+}
+
 void expect_connected(const ioxx::net::TcpStream& stream) {
     const auto error = stream.take_error();
     ASSERT_FALSE(error.has_value()) << error->message();
@@ -141,6 +145,50 @@ TEST(TcpTests, GetTtlWithoutPreviousSet) {
     const auto ttl = listener.ttl(ec);
     EXPECT_FALSE(ec);
     EXPECT_GT(ttl, 0);
+}
+
+TEST(TcpTests, Ipv6LoopbackRoundTrip) {
+    std::error_code ec;
+    auto listener = ioxx::net::TcpListener::bind(loopback_v6(), ec);
+    if (ec) {
+        GTEST_SKIP() << "IPv6 loopback is not available: " << ec.message();
+    }
+
+    listener.set_ttl(12, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(listener.ttl(ec), 12);
+    ASSERT_FALSE(ec) << ec.message();
+
+    const auto endpoint = listener.local_endpoint();
+    auto client = ioxx::net::TcpStream::connect(endpoint);
+    auto [server, peer] = accept_with_retry(listener);
+    ASSERT_TRUE(server.valid());
+    EXPECT_TRUE(peer.is_v6());
+    expect_connected(client);
+
+    expect_write(client, "ipv6/request");
+    std::array<std::byte, 128> buffer{};
+    EXPECT_EQ(read_into(server, buffer), "ipv6/request");
+}
+
+TEST(TcpTests, DualStackListenerAcceptsIpv4Clients) {
+    std::error_code ec;
+    auto listener = ioxx::net::TcpListener::bind_dual_stack(0, ec);
+    if (ec) {
+        GTEST_SKIP() << "dual-stack IPv6 sockets are not available: " << ec.message();
+    }
+
+    const auto endpoint = loopback(listener.local_endpoint().port());
+    auto client = ioxx::net::TcpStream::connect(endpoint);
+    auto [server, peer] = accept_with_retry(listener);
+    ASSERT_TRUE(server.valid());
+    EXPECT_TRUE(peer.is_v4());
+    EXPECT_EQ(peer.port(), client.local_endpoint().port());
+    expect_connected(client);
+
+    expect_write(client, "dual-stack/request");
+    std::array<std::byte, 128> buffer{};
+    EXPECT_EQ(read_into(server, buffer), "dual-stack/request");
 }
 
 TEST(TcpTests, AcceptWithoutPoll) {

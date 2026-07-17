@@ -17,6 +17,10 @@ ioxx::net::SocketAddrV4 loopback(std::uint16_t port = 0) {
     return ioxx::net::SocketAddrV4{ioxx::net::Ipv4Addr{127, 0, 0, 1}, port};
 }
 
+ioxx::net::SocketAddrV6 loopback_v6(std::uint16_t port = 0) {
+    return ioxx::net::SocketAddrV6{ioxx::net::Ipv6Addr{0, 0, 0, 0, 0, 0, 0, 1}, port};
+}
+
 void expect_udp_send_to(ioxx::net::UdpSocket& socket, std::string_view payload, const ioxx::net::SocketAddr& peer) {
     std::error_code ec;
     const auto sent = socket.send_to(payload.data(), payload.size(), peer, ec);
@@ -61,6 +65,55 @@ TEST(UdpTests, GetTtlWithoutPreviousSet) {
     const auto ttl = socket.ttl(ec);
     EXPECT_FALSE(ec);
     EXPECT_GT(ttl, 0);
+}
+
+TEST(UdpTests, Ipv6LoopbackRoundTrip) {
+    std::error_code ec;
+    auto sender = ioxx::net::UdpSocket::bind(loopback_v6(), ec);
+    if (ec) {
+        GTEST_SKIP() << "IPv6 loopback is not available: " << ec.message();
+    }
+    auto receiver = ioxx::net::UdpSocket::bind(loopback_v6(), ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    receiver.set_ttl(12, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(receiver.ttl(ec), 12);
+    ASSERT_FALSE(ec) << ec.message();
+
+    expect_udp_send_to(sender, "udp-ipv6/request", receiver.local_endpoint());
+
+    std::array<std::byte, 128> buffer{};
+    const auto [payload, peer] = recv_udp_from(receiver, buffer);
+    EXPECT_EQ(payload, "udp-ipv6/request");
+    EXPECT_TRUE(peer.is_v6());
+    EXPECT_EQ(peer.port(), sender.local_endpoint().port());
+}
+
+TEST(UdpTests, DualStackSocketReceivesAndRepliesToIpv4) {
+    std::error_code ec;
+    auto server = ioxx::net::UdpSocket::bind_dual_stack(0, ec);
+    if (ec) {
+        GTEST_SKIP() << "dual-stack IPv6 sockets are not available: " << ec.message();
+    }
+    auto client = ioxx::net::UdpSocket::bind(loopback());
+    const auto server_endpoint = loopback(server.local_endpoint().port());
+
+    expect_udp_send_to(client, "udp-dual/request", server_endpoint);
+
+    std::array<std::byte, 128> server_buffer{};
+    const auto [request, client_peer] = recv_udp_from(server, server_buffer);
+    EXPECT_EQ(request, "udp-dual/request");
+    EXPECT_TRUE(client_peer.is_v4());
+    EXPECT_EQ(client_peer.port(), client.local_endpoint().port());
+
+    expect_udp_send_to(server, "udp-dual/reply", client_peer);
+
+    std::array<std::byte, 128> client_buffer{};
+    const auto [reply, server_peer] = recv_udp_from(client, client_buffer);
+    EXPECT_EQ(reply, "udp-dual/reply");
+    EXPECT_TRUE(server_peer.is_v4());
+    EXPECT_EQ(server_peer.port(), server_endpoint.port());
 }
 
 TEST(UdpTests, UdpRoundTrip) {

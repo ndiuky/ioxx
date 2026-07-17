@@ -51,6 +51,44 @@ public:
 #endif
 }
 
+[[nodiscard]] bool is_ipv4_mapped_ipv6(const std::array<std::uint8_t, 16>& octets) noexcept {
+    for (std::size_t i = 0; i < 10; ++i) {
+        if (octets[i] != 0) return false;
+    }
+    return octets[10] == 0xff && octets[11] == 0xff;
+}
+
+[[nodiscard]] ResolvedAddress resolve_ipv4_mapped_endpoint(const net::SocketAddrV4& endpoint,
+                                                           int socket_type,
+                                                           int protocol) noexcept {
+    ResolvedAddress address{};
+    address.family = AF_INET6;
+    address.type = socket_type;
+    address.protocol = protocol;
+    address.length = sizeof(sockaddr_in6);
+
+    auto* in6 = reinterpret_cast<sockaddr_in6*>(&address.storage);
+    in6->sin6_family = AF_INET6;
+    in6->sin6_port = htons(endpoint.port());
+    auto& octets = endpoint.ip().octets();
+    auto* bytes = reinterpret_cast<std::uint8_t*>(&in6->sin6_addr);
+    bytes[10] = 0xff;
+    bytes[11] = 0xff;
+    std::memcpy(bytes + 12, octets.data(), 4);
+    return address;
+}
+
+[[nodiscard]] int socket_family(socket_handle handle, std::error_code& ec) noexcept {
+    sockaddr_storage storage{};
+    socklen_t length = sizeof(storage);
+    if (getsockname(handle, reinterpret_cast<sockaddr*>(&storage), &length) != 0) {
+        ec = last_socket_error();
+        return AF_UNSPEC;
+    }
+    ec.clear();
+    return storage.ss_family;
+}
+
 } // namespace
 
 void ensure_socket_runtime() {
@@ -259,6 +297,39 @@ int get_socket_int_option(socket_handle handle, int level, int option) {
     return res;
 }
 
+void set_ipv6_only(socket_handle handle, bool enabled, std::error_code& ec) noexcept {
+#if defined(IPV6_V6ONLY)
+    set_socket_bool_option(handle, IPPROTO_IPV6, IPV6_V6ONLY, enabled, ec);
+#else
+    (void)handle;
+    (void)enabled;
+    ec = std::make_error_code(std::errc::function_not_supported);
+#endif
+}
+
+void set_ipv6_only(socket_handle handle, bool enabled) {
+    std::error_code ec;
+    set_ipv6_only(handle, enabled, ec);
+    if (ec) throw socket_exception("setsockopt(IPV6_V6ONLY)", ec);
+}
+
+bool get_ipv6_only(socket_handle handle, std::error_code& ec) noexcept {
+#if defined(IPV6_V6ONLY)
+    return get_socket_bool_option(handle, IPPROTO_IPV6, IPV6_V6ONLY, ec);
+#else
+    (void)handle;
+    ec = std::make_error_code(std::errc::function_not_supported);
+    return false;
+#endif
+}
+
+bool get_ipv6_only(socket_handle handle) {
+    std::error_code ec;
+    const bool res = get_ipv6_only(handle, ec);
+    if (ec) throw socket_exception("getsockopt(IPV6_V6ONLY)", ec);
+    return res;
+}
+
 void set_reuse_port(socket_handle handle, bool enabled, std::error_code& ec) noexcept {
 #if defined(SO_REUSEPORT)
     set_socket_bool_option(handle, SOL_SOCKET, SO_REUSEPORT, enabled, ec);
@@ -354,6 +425,41 @@ void set_dont_fragment(socket_handle handle, bool enabled) {
     if (ec) throw socket_exception("setsockopt", ec);
 }
 
+void set_unicast_hops(socket_handle handle, std::uint32_t hops, std::error_code& ec) noexcept {
+    const int value = static_cast<int>(hops);
+    std::error_code family_ec;
+    const int family = socket_family(handle, family_ec);
+    if (!family_ec && family == AF_INET6) {
+        set_socket_int_option(handle, IPPROTO_IPV6, IPV6_UNICAST_HOPS, value, ec);
+        return;
+    }
+
+    set_socket_int_option(handle, IPPROTO_IP, IP_TTL, value, ec);
+}
+
+void set_unicast_hops(socket_handle handle, std::uint32_t hops) {
+    std::error_code ec;
+    set_unicast_hops(handle, hops, ec);
+    if (ec) throw socket_exception("setsockopt(unicast hops)", ec);
+}
+
+std::uint32_t get_unicast_hops(socket_handle handle, std::error_code& ec) noexcept {
+    std::error_code family_ec;
+    const int family = socket_family(handle, family_ec);
+    if (!family_ec && family == AF_INET6) {
+        return static_cast<std::uint32_t>(get_socket_int_option(handle, IPPROTO_IPV6, IPV6_UNICAST_HOPS, ec));
+    }
+
+    return static_cast<std::uint32_t>(get_socket_int_option(handle, IPPROTO_IP, IP_TTL, ec));
+}
+
+std::uint32_t get_unicast_hops(socket_handle handle) {
+    std::error_code ec;
+    const auto res = get_unicast_hops(handle, ec);
+    if (ec) throw socket_exception("getsockopt(unicast hops)", ec);
+    return res;
+}
+
 std::uint32_t get_mtu(socket_handle handle, std::error_code& ec) noexcept {
 #if defined(__linux__) || defined(_WIN32)
     int mtu = get_socket_int_option(handle, IPPROTO_IP, IP_MTU, ec);
@@ -436,6 +542,34 @@ ResolvedAddress resolve_endpoint(const net::SocketAddr& endpoint, int socket_typ
     return res;
 }
 
+ResolvedAddress resolve_endpoint_for_socket(socket_handle handle,
+                                            const net::SocketAddr& endpoint,
+                                            int socket_type,
+                                            int protocol,
+                                            std::error_code& ec) noexcept {
+    if (endpoint.is_v4()) {
+        std::error_code family_ec;
+        const int family = socket_family(handle, family_ec);
+        if (!family_ec && family == AF_INET6) {
+            ec.clear();
+            return resolve_ipv4_mapped_endpoint(*endpoint.as_v4(), socket_type, protocol);
+        }
+    }
+    return resolve_endpoint(endpoint, socket_type, protocol, ec);
+}
+
+ResolvedAddress resolve_endpoint_for_socket(socket_handle handle,
+                                            const net::SocketAddr& endpoint,
+                                            int socket_type,
+                                            int protocol) {
+    std::error_code ec;
+    auto res = resolve_endpoint_for_socket(handle, endpoint, socket_type, protocol, ec);
+    if (ec) {
+        throw std::system_error(ec, "resolve endpoint");
+    }
+    return res;
+}
+
 net::SocketAddr endpoint_from_sockaddr(const sockaddr* address, socklen_t length, std::error_code& ec) noexcept {
     (void)length;
     ec.clear();
@@ -449,6 +583,11 @@ net::SocketAddr endpoint_from_sockaddr(const sockaddr* address, socklen_t length
         const auto* in6 = reinterpret_cast<const sockaddr_in6*>(address);
         std::array<std::uint8_t, 16> octets;
         std::memcpy(octets.data(), &in6->sin6_addr, 16);
+        if (is_ipv4_mapped_ipv6(octets)) {
+            std::array<std::uint8_t, 4> v4_octets;
+            std::memcpy(v4_octets.data(), octets.data() + 12, 4);
+            return net::SocketAddrV4{net::Ipv4Addr{v4_octets}, ntohs(in6->sin6_port)};
+        }
         return net::SocketAddrV6{net::Ipv6Addr{octets}, ntohs(in6->sin6_port), ntohl(in6->sin6_flowinfo), in6->sin6_scope_id};
     } else {
         ec = std::make_error_code(std::errc::address_family_not_supported);

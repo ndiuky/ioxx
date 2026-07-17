@@ -244,6 +244,12 @@ public:
     void set_tcp_fastopen(int backlog) const;
     void set_tcp_fastopen_connect(bool enabled, std::error_code& ec) const noexcept;
     void set_tcp_fastopen_connect(bool enabled) const;
+    void set_ipv6_only(bool enabled, std::error_code& ec) const noexcept;
+    void set_ipv6_only(bool enabled) const;
+    [[nodiscard]] bool ipv6_only(std::error_code& ec) const noexcept;
+    [[nodiscard]] bool ipv6_only() const;
+    void set_dual_stack(bool enabled, std::error_code& ec) const noexcept;
+    void set_dual_stack(bool enabled) const;
 
     TcpListener bind(const SocketAddr& endpoint, int backlog, std::error_code& ec) noexcept;
     TcpListener bind(const SocketAddr& endpoint, int backlog = 128);
@@ -329,6 +335,12 @@ public:
     static TcpListener bind(const SocketAddr& endpoint, int backlog = 128);
     static TcpListener bind(const SocketAddr& endpoint, int backlog, std::error_code& ec) noexcept;
     static TcpListener bind(const SocketAddr& endpoint, std::error_code& ec) noexcept;
+    static TcpListener bind_v6_only(const SocketAddrV6& endpoint, int backlog = 128);
+    static TcpListener bind_v6_only(const SocketAddrV6& endpoint, int backlog, std::error_code& ec) noexcept;
+    static TcpListener bind_v6_only(const SocketAddrV6& endpoint, std::error_code& ec) noexcept;
+    static TcpListener bind_dual_stack(std::uint16_t port, int backlog = 128);
+    static TcpListener bind_dual_stack(std::uint16_t port, int backlog, std::error_code& ec) noexcept;
+    static TcpListener bind_dual_stack(std::uint16_t port, std::error_code& ec) noexcept;
 
     TcpListener(const TcpListener&) = delete;
     TcpListener& operator=(const TcpListener&) = delete;
@@ -371,6 +383,10 @@ public:
     explicit UdpSocket(native_handle_type handle);
     static UdpSocket bind(const SocketAddr& endpoint);
     static UdpSocket bind(const SocketAddr& endpoint, std::error_code& ec) noexcept;
+    static UdpSocket bind_v6_only(const SocketAddrV6& endpoint);
+    static UdpSocket bind_v6_only(const SocketAddrV6& endpoint, std::error_code& ec) noexcept;
+    static UdpSocket bind_dual_stack(std::uint16_t port);
+    static UdpSocket bind_dual_stack(std::uint16_t port, std::error_code& ec) noexcept;
 
     UdpSocket(const UdpSocket&) = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
